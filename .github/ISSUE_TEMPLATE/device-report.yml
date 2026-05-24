@@ -1,0 +1,54 @@
+name: "Device report / new finding"
+description: "Share your Samsung AC details, or report a control method you found."
+title: "[device] <model> — pi=<shp|oic> — <found a method? yes/no>"
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing! This helps build the `pi=oic` vs `pi=shp` controllability map,
+        and surfaces any working method so the next person (or AI agent) doesn't repeat dead ends.
+        See `REPRODUCE.md` for how to read the values below.
+  - type: input
+    id: model
+    attributes:
+      label: AC model + year
+      placeholder: "e.g. AR12KS, 2017"
+    validations:
+      required: true
+  - type: dropdown
+    id: pi
+    attributes:
+      label: ocf.pi value
+      options: ["shp", "oic", "other / not sure"]
+    validations:
+      required: true
+  - type: input
+    id: vid
+    attributes:
+      label: vid (device profile)
+      placeholder: "e.g. DA-AC-RAC-100001"
+  - type: input
+    id: mnmo
+    attributes:
+      label: mnmo (model code)
+      placeholder: "e.g. TP6X_RAC_16K|..."
+  - type: dropdown
+    id: control
+    attributes:
+      label: Does cloud/software control work for you?
+      options: ["No — reads only (writes don't apply)", "Yes — I can control it", "Partially (some commands)"]
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Did you find a working control method? Describe it.
+      description: "Especially valuable for pi=shp units. What exactly did you do?"
+      placeholder: "e.g. ESPHome F1/F2 with NonNASA, IR + SmartThings feedback, a token method, an Edge driver, ..."
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (commands, API responses, packet captures, logs)
+      description: "Extraordinary claims need reproducible evidence — show the request and the observed state change."
+      render: shell

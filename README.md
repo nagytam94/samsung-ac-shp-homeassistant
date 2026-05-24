@@ -202,9 +202,15 @@ Your Samsung AC in SmartThings → check `pi`
 - ESPHome Samsung HVAC bus: https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus
 - The older local-API project (pre-OCF, does **not** work on this `pi=shp` generation): `SebuZet/samsungrac`
 
-## Contributing
+## Found a method? Have a different unit? Report it 📢
 
-If you have a Samsung AC, please open an issue with your **`pi` value**, **`vid`**, **`mnmo` model code**, year, and whether **control works** — to crowd-source the `pi=oic` vs `pi=shp` controllability map. PRs welcome.
+This repo is meant to stay alive. **If you discover anything — especially a way to make writes apply on a `pi=shp` unit — please share it** so the next person (or AI agent) doesn't repeat the dead ends:
+
+- **Open an Issue** using the *"Device report / new finding"* template (model, year, `pi`, `vid`, `mnmo`, what works, and any method you found — with evidence). This also crowd-sources the `pi=oic` vs `pi=shp` controllability map.
+- **Start a Discussion** for open-ended "did anyone find a way?" questions.
+- **Open a PR** to update the writeup directly.
+
+Extraordinary claims need reproducible evidence (the request + the observed device state change). All contributions welcome — including from AI agents (see [`AGENTS.md`](AGENTS.md)).
 
 ## Disclaimer
 
