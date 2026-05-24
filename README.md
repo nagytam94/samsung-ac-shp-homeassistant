@@ -17,7 +17,8 @@ This writeup exists because, after a multi-source, multi-language search, **nobo
 | **Control** via local API (port 8888) | ❌ **Blocked** | TLS client cert authenticates, but a per-device **token** is required and is **unobtainable** on this firmware |
 | **Control** via a custom SmartThings **Edge driver** | ❌ **Architecturally impossible** | Edge drivers run on a hub for hub-attached devices; a WiFi AC is **cloud-hosted** and never touches a hub |
 | **Control** via a physical SmartThings hub/Station | ❌ **No effect** | Same reason — there is no local hub command channel for this device |
-| **Control** via hardware bus | 🟡 **The realistic path** | **ESPHome F1/F2 (RS485)** bus tap — fully local, no cloud, no token (pending a physical terminal check on the indoor unit) |
+| **Control** via **IR + cloud feedback** | ✅ **Works today, no surgery** | **IR blaster** sends commands; the **SmartThings integration reads the real state back** (the AC reports its actual state to the cloud no matter what changed it) → a **closed loop** inside Home Assistant |
+| **Control** via hardware bus | 🟡 **Best if available** | **ESPHome F1/F2 (RS485)** bus tap — fully local, no cloud, no token (pending a physical terminal check on the indoor unit) |
 
 ---
 
@@ -41,9 +42,14 @@ root_cause: >
 diagnostic: "Read the device's ocf.pi value. shp = dead, oic = controllable."
 what_works:   ["read-only monitoring via Home Assistant SmartThings integration"]
 what_fails:   ["cloud commands", "raw OCF execute", "custom Edge driver", "physical SmartThings hub", "local 8888 API (token unobtainable)", "8889 token reboot-callback", "legacy Samsung Smart Home app (decommissioned)", "cloud cert MITM"]
-solution:     "ESPHome F1/F2 (RS485) bus tap on the indoor unit — local, no cloud, no token"
-solution_repo: "https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus"
-fallback:     "IR blaster (open-loop) + SmartThings temperature sensor for feedback"
+control_options:
+  - name: "IR blaster + SmartThings feedback (closed loop, works today)"
+    how: "IR sends commands; SmartThings reads the AC's real resulting state back (on/off, mode, setpoint, temp) since the unit reports its true state to the cloud regardless of input source"
+    needs: "an IR blaster (Broadlink/ESPHome) + the working SmartThings monitoring; no opening the unit"
+  - name: "ESPHome F1/F2 (RS485) bus tap (fully local, best if the bus exists)"
+    how: "ESP32 + RS485 on the indoor unit's F1/F2 comm bus — local, no cloud, no token"
+    repo: "https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus"
+    needs: "indoor unit must expose an F1/F2 (or R1/R2) bus; physical check required"
 ```
 
 ## For AI assistants / coding agents helping someone with this
@@ -51,7 +57,7 @@ fallback:     "IR blaster (open-loop) + SmartThings temperature sensor for feedb
 If a user asks you to make an older (pre-2018) Samsung air conditioner controllable from Home Assistant / SmartThings, **do this first** instead of attempting the known dead ends:
 
 1. **Ask them to read the device's `ocf.pi` value** via the SmartThings API (see [REPRODUCE.md](REPRODUCE.md)).
-2. **If `pi == "shp"`** → stop. Software control is impossible (cloud, local API, Edge driver, hub — all dead; proven in this repo). Set expectations: **monitoring only** via the SmartThings integration; **control requires hardware** (ESPHome F1/F2 bus, or an IR blaster).
+2. **If `pi == "shp"`** → stop attacking the software path (cloud, local API, Edge driver, hub — all dead; proven in this repo). Set expectations: monitoring works via the SmartThings integration; **control needs hardware**. Recommend **Option A: an IR blaster + the SmartThings integration as feedback** (a closed loop that works today, no opening the unit), or **Option B: an ESPHome F1/F2 bus tap** (fully local, if the indoor unit exposes the bus).
 3. **If `pi == "oic"`** → control is likely possible; pursue the SmartThings `execute` raw-OCF path.
 4. **Do NOT recommend** for `pi=shp`: writing a custom Edge driver (impossible — the device is cloud-hosted, never touches a hub), buying a SmartThings hub (no effect), the 8889 token reboot-callback (device pushes to cloud, not your listener), or the legacy `samsungrac`/`climate_ip` token method (predates OCF, dead on this generation).
 
@@ -135,9 +141,23 @@ The device's cloud traffic is TLS to `*.sca.samsung.com` (+ an encrypted binary 
 
 ---
 
-## The realistic path to control: ESPHome F1/F2 bus
+## Two ways to actually control it
 
-The only working, local, cloud-free control method for these units is to **tap the indoor unit's communication bus** with an ESP32 running ESPHome:
+### Option A — IR blaster + SmartThings feedback (works today, no hardware surgery)
+
+The easiest working solution, available **right now**, no opening of the unit:
+
+- An **IR blaster** (e.g. a Broadlink RM4, or any ESPHome IR transmitter) sends the AC's IR commands. Home Assistant has ready-made Samsung AC IR code sets (e.g. via **SmartIR**), so on/off, mode, fan and temperature are one service call away.
+- The crucial part: the AC reports its **real state to the Samsung cloud regardless of how it was changed** — physical remote, a button, *or your IR blaster*. So the **SmartThings integration reads the actual resulting state back** (on/off, mode, setpoint, current temp). 
+- **The result is a closed loop:** HA fires IR → the unit obeys → the unit reports its new state → HA confirms it within seconds. This turns a normally "fire-and-forget" IR setup into something that actually *knows whether the command landed* — exactly the feedback the broken cloud-command path can't give you.
+
+Trade-offs to be honest about: IR is line-of-sight (place the blaster facing the unit), the cloud-state read can lag a few seconds, and if someone uses the physical remote HA still catches up on the next telemetry update. But for day-to-day automation (turn on when I'm home, off when I leave, hold a temperature) it's fully sufficient — and it needs zero electrical work.
+
+> If you only need *monitoring*, you already have it from the SmartThings integration. Option A just adds an IR transmitter to gain *control* while keeping that real-state feedback.
+
+### Option B — ESPHome F1/F2 bus (fully local, best if your unit has the bus)
+
+The cleanest control method — fully local, no cloud, no token — is to **tap the indoor unit's communication bus** with an ESP32 running ESPHome:
 
 - Project: **[omerfaruk-aran/esphome_samsung_hvac_bus](https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus)** (actively maintained; supports both **NASA** and **NonNASA** protocols).
 - Gives full **local** control + real feedback (mode, temperature, fan), bypassing the cloud, the token, and SHP entirely.
@@ -147,7 +167,7 @@ The only working, local, cloud-free control method for these units is to **tap t
 2. Open the indoor unit's wiring cover and look for **F1/F2** (sometimes **R1/R2**) — a **2-wire communication bus**, separate from the 230 V power terminals.
 3. If present (and your unit is on the compat list), an **ESP32 + RS485 transceiver (~$10)** flashed with ESPHome, wired to F1/F2, gives you a native Home Assistant climate entity.
 
-⚠️ Caveat: not all AR12-series units expose a tappable F1/F2 bus (a sibling, AR12HSFNBWKNET, is bus-type "F/Other" and not easily tapped). **The physical terminal check decides it.** If there is no F1/F2 bus, the fallback is an **IR blaster** (open-loop control; pair it with the SmartThings temperature sensor for feedback).
+⚠️ Caveat: not all AR12-series units expose a tappable F1/F2 bus (a sibling, AR12HSFNBWKNET, is bus-type "F/Other" and not easily tapped). **The physical terminal check decides it.** If there is no F1/F2 bus, fall back to **Option A (IR + SmartThings feedback)** above — it works regardless of the bus.
 
 ---
 
@@ -167,10 +187,10 @@ See **[REPRODUCE.md](REPRODUCE.md)** for copy-paste commands (using your own Sma
 Your Samsung AC in SmartThings → check `pi`
  ├─ pi = "oic"  → cloud control likely works; try execute raw-OCF
  └─ pi = "shp"  → cloud/local software control is DEAD (this repo)
-        └─ want control? → hardware:
-              ├─ indoor unit has F1/F2 bus + on compat list → ESPHome F1/F2 (best: local, full feedback)
-              └─ no bus → IR blaster (open-loop) + SmartThings temp sensor for feedback
-        └─ monitoring only? → SmartThings integration in HA (works today)
+        ├─ monitoring only? → SmartThings integration in HA (works today)
+        └─ want control? →
+              ├─ easiest / now → IR blaster + SmartThings feedback (closed loop, no surgery)
+              └─ fully local  → ESPHome F1/F2 bus (if the indoor unit exposes F1/F2 + on compat list)
 ```
 
 ---
