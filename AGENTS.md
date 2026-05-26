@@ -18,6 +18,7 @@ Check the device's **`ocf.pi`** value via the SmartThings API (see `REPRODUCE.md
 - Local 8888 API → TLS cert authenticates but needs a per-device token that is unobtainable (8889 reboot-callback pushes to Samsung's cloud, not your listener; the legacy Samsung Smart Home app is decommissioned).
 - Cloud certificate MITM → the device validates Samsung's cert; impossible without Samsung's private key.
 - Port 2878, firmware SHP→OCF migration, HF-LPT220 module reflash → all dead.
+- SmartThings **Advanced web UI** (`my.smartthings.com/advanced/devices`) → device shows ONLINE, exec=Cloud, switch history visible, but UI-issued on/off commands have **no physical effect** on a `pi=shp` unit (verified 2026-05-27). Same dead cloud translator; the "raw" developer console is not a workaround.
 
 The broken component is **Samsung's closed cloud→SHP command translator**. It is not reachable from your network or any driver.
 

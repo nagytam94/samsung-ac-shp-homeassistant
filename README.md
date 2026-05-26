@@ -139,6 +139,9 @@ The device's cloud traffic is TLS to `*.sca.samsung.com` (+ an encrypted binary 
 - **Firmware migration SHP → OCF:** no path; the update mechanism depends on the dead legacy cloud.
 - **Module reflash (HF-LPT220):** the stock web UI / AT interfaces are stripped in the Samsung build (port scan shows only 8888); SPI chip-off is the only remaining physical read, and the token may be generated on-demand (not stored). Not pragmatic.
 
+### 8. SmartThings Advanced web UI (`my.smartthings.com/advanced`) — ❌
+Samsung's developer-facing web console for SmartThings (`my.smartthings.com/advanced/devices`) lists the AC as **ONLINE**, exec=Cloud, and shows the device's recent switch history. From the device detail page, sending **on/off** or other capability commands behaves **identically to the REST API**: the UI reports the action accepted, but the **physical unit does not respond** — same dead `pi=shp` cloud→device translator. The "movement history" toggles visible in the UI are state updates the unit *reports* (from IR remote, F1/F2 bus, or external integrations), not the result of UI-initiated commands. Worth noting because the Advanced console is the most "raw" web surface SmartThings exposes — and it confirms that no consumer-accessible web client has a working write path on this generation.
+
 ---
 
 ## Two ways to actually control it
