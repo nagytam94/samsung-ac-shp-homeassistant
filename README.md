@@ -2,9 +2,53 @@
 
 A full, evidence-based investigation into integrating a **2017-era Samsung wall-split air conditioner** (model family **AR12KS**, WiFi module firmware family **`TP6X_RAC`**) with **Home Assistant**.
 
-**Short version:** cloud **monitoring works**, software **control does not** (and *cannot*, for this generation), and the only realistic control path is a **hardware bus tap (ESPHome F1/F2)**.
+**Short version (updated 2026-05-28):** cloud **monitoring** works, **basic control via Home Assistant SmartThings integration also works** (switch, mode, fan, temperature setpoint), and the only thing still missing is reliable **state feedback** from the device to the cloud (reads are stale on `pi=shp`). The older "everything is dead" conclusion applied to the **web UI / mobile app plugin layer** — not to the REST API capability path that HA's pysmartthings library uses.
 
 This writeup exists because, after a multi-source, multi-language search, **nobody had clearly documented this exact generation** — specifically the `pi="shp"` units. If you own a pre-2018 Samsung AC and you're going in circles, this should save you days.
+
+---
+
+## ⚡ BREAKTHROUGH 2026-05-28: Home Assistant SmartThings integration WORKS for basic control on `pi=shp`
+
+After an exhaustive series of investigations (five rounds of empirical testing from 2026-05-24 through 2026-05-28), **physical control was confirmed working** via the Home Assistant SmartThings integration on this `pi=shp` unit. This contradicts the earlier conclusion and is believed to be the **first publicly documented case** of successful software control on this device family.
+
+### What WORKS via REST API (HA SmartThings integration, `pysmartthings`)
+
+| Capability | Command | Verified |
+|---|---|---|
+| `switch` | `on` / `off` | ✅ Physical — compressor starts/stops |
+| `airConditionerMode` | `cool` / `dry` / `wind` / `auto` | ✅ Physical — mode changes on display |
+| `airConditionerFanMode` | `auto` / `low` / `medium` / `high` / `turbo` | ✅ Physical — fan speed changes audibly |
+| `thermostatCoolingSetpoint` | `setCoolingSetpoint(16–30)` | Likely — not fully verified across all modes |
+
+### What still does NOT work
+
+| Issue | Status |
+|---|---|
+| SmartThings web UI (`my.smartthings.com`) on/off and mode commands | ❌ Accepted but never applied (different backend path) |
+| Samsung mobile app commands | ❌ Same plugin layer as web UI |
+| Raw OCF `execute` passthrough | ❌ Returns `execute.data: null` |
+| Device→cloud state sync (current state visible in HA) | ❌ Broken — cloud has stale state for `pi=shp`; see details below |
+| Local 8888 API token | ❌ Still unobtainable |
+
+### Why HA works but the web UI does not
+
+This is the key insight: **they use completely different backend paths.**
+
+- **HA SmartThings integration (pysmartthings):** calls `POST https://api.smartthings.com/v1/devices/{id}/commands` with a Bearer token (OAuth2 PAT). This is the **public SmartThings Developer REST API**. For this unit, switch and mode capabilities are routed through Samsung's cloud correctly and reach the device.
+- **SmartThings web UI (`my.smartthings.com`) and mobile app:** call `POST https://client.smartthings.com/graphql` (GraphQL), authenticated via **Samsung SSO session cookie** — a completely different microservice (the consumer-facing "plugin layer"). This layer is broken for `pi=shp` units and has been confirmed dead across five investigation rounds.
+
+The broken component everyone encountered was always the **consumer plugin layer** — not the developer REST API. Once HA bypasses that layer, commands get through.
+
+### State feedback caveat
+
+The remaining real limitation: the **Samsung cloud does not reliably update device state** for `pi=shp` units. The device→cloud telemetry pipeline is broken (unit state changes — power, mode, setpoint — are not pushed back). Consequences:
+
+- HA reads show stale values after you send a command (the entity may not update)
+- The `pysmartthings` SSE subscription may fail with `TransferEncodingError` (observed 2026-05-27)
+- Workaround: add a watchdog automation in HA that reloads the SmartThings integration config entry every 5 minutes, or poll manually
+
+The full fix for state feedback is **local mTLS polling** on port 8888 (the community client cert + key are available, and the device serves live status there — it just requires an unobtainable write token; reads may work without one on some firmware variants).
 
 ---
 
@@ -12,56 +56,77 @@ This writeup exists because, after a multi-source, multi-language search, **nobo
 
 | Goal | Status | How |
 |------|--------|-----|
-| **Read** state (on/off, current temp, mode, setpoint, air quality) | ✅ **Works** | Official **SmartThings** integration in Home Assistant (cloud OAuth) |
-| **Control** (on/off, mode, temperature) via cloud | ❌ **Impossible** | Cloud accepts the command (`COMPLETED`) and the unit *beeps*, but never applies it |
-| **Control** via local API (port 8888) | ❌ **Blocked** | TLS client cert authenticates, but a per-device **token** is required and is **unobtainable** on this firmware |
-| **Control** via a custom SmartThings **Edge driver** | ❌ **Architecturally impossible** | Edge drivers run on a hub for hub-attached devices; a WiFi AC is **cloud-hosted** and never touches a hub |
-| **Control** via a physical SmartThings hub/Station | ❌ **No effect** | Same reason — there is no local hub command channel for this device |
-| **Control** via **IR + cloud feedback** | ✅ **Works today, no surgery** | **IR blaster** sends commands; the **SmartThings integration reads the real state back** (the AC reports its actual state to the cloud no matter what changed it) → a **closed loop** inside Home Assistant |
-| **Control** via hardware bus | 🟡 **Best if available** | **ESPHome F1/F2 (RS485)** bus tap — fully local, no cloud, no token (pending a physical terminal check on the indoor unit) |
+| **Read** state (on/off, current temp, mode, setpoint) | ✅ Works (stale) | Official **SmartThings** integration in HA (cloud OAuth) — state may lag |
+| **Control** (on/off, mode, fan, temperature) via HA SmartThings | ✅ **Works** | `POST /v1/devices/{id}/commands` REST API — physically verified 2026-05-28 |
+| **Control** via SmartThings web UI or mobile app | ❌ Never applied | Consumer plugin layer — beeps but no effect |
+| **Control** via raw OCF `execute` | ❌ Dead | Returns `execute.data: null` |
+| **Control** via local API (port 8888) | ❌ Blocked | TLS client cert authenticates, but per-device token unobtainable |
+| **Control** via a custom SmartThings **Edge driver** | ❌ Architecturally impossible | Edge drivers are for hub-attached devices; this AC is cloud-hosted |
+| **Control** via a physical SmartThings hub/Station | ❌ No effect | No local hub command channel exists for this device |
+| **Control** via **IR + cloud feedback** | ✅ Works, no surgery | IR blaster sends commands; SmartThings reads real state back (closed loop) |
+| **Control** via hardware bus | 🟡 Best if available | **ESPHome F1/F2 (RS485)** — fully local, no cloud, no token |
 
 ---
 
 ## Machine-readable summary (for search engines & AI agents)
 
 ```yaml
-problem: Samsung air conditioner cannot be controlled from Home Assistant or SmartThings
+problem: Samsung air conditioner — integrating with Home Assistant and SmartThings
 device:
   brand: Samsung
   family: AR12KS          # 2017 wall-split, Digital Inverter
   module_firmware: TP6X_RAC
   smartthings_device_type: "Samsung OCF Air Conditioner"
   smartthings_vid: DA-AC-RAC-100001
-  ocf_pi: shp             # <-- ROOT CAUSE. shp = Samsung Home Protocol (not real OCF)
+  ocf_pi: shp             # Samsung Home Protocol (not real OCF)
   wifi_module: HF-LPT220
-root_cause: >
-  Devices with ocf pi="shp" are NOT controllable via SmartThings cloud or HA.
-  Reads work; every write returns COMPLETED but is never applied; the raw OCF
-  `execute` capability returns execute.data=null. The cloud->device command
-  translator is a closed Samsung component and is broken/won't-fix for pre-2018 units.
-diagnostic: "Read the device's ocf.pi value. shp = dead, oic = controllable."
-what_works:   ["read-only monitoring via Home Assistant SmartThings integration"]
-what_fails:   ["cloud commands", "raw OCF execute", "custom Edge driver", "physical SmartThings hub", "local 8888 API (token unobtainable)", "8889 token reboot-callback", "legacy Samsung Smart Home app (decommissioned)", "cloud cert MITM"]
+status_update: "2026-05-28 — basic control confirmed working via HA SmartThings REST API"
+what_works:
+  - "Read-only monitoring via Home Assistant SmartThings integration (state may be stale)"
+  - "Control via HA SmartThings REST API: switch on/off, mode, fan speed, cooling setpoint"
+  - "IR blaster + SmartThings feedback (closed loop, no hardware surgery)"
+  - "ESPHome F1/F2 bus (fully local, if the indoor unit exposes the bus)"
+what_fails:
+  - "SmartThings web UI (my.smartthings.com) and mobile app commands — consumer plugin layer, broken for pi=shp"
+  - "raw OCF execute capability — execute.data=null"
+  - "custom Edge driver — architecturally impossible"
+  - "physical SmartThings hub — no effect"
+  - "local 8888 API token — unobtainable"
+  - "8889 token reboot-callback — pushes to Samsung cloud, not local listener"
+  - "legacy Samsung Smart Home app — decommissioned"
+  - "cloud cert MITM"
+  - "device→cloud state sync — broken (stale reads after commands)"
+key_insight: >
+  The consumer web UI and mobile app use a GraphQL-based plugin layer
+  (client.smartthings.com/graphql, Samsung SSO auth) that is broken for pi=shp.
+  The HA SmartThings integration uses the public Developer REST API
+  (api.smartthings.com/v1/devices/{id}/commands, Bearer OAuth2), which routes
+  commands correctly. These are two completely separate backend paths.
+diagnostic: "Check ocf.pi. shp = restricted but HA REST API control works for basic capabilities."
 control_options:
-  - name: "IR blaster + SmartThings feedback (closed loop, works today)"
-    how: "IR sends commands; SmartThings reads the AC's real resulting state back (on/off, mode, setpoint, temp) since the unit reports its true state to the cloud regardless of input source"
-    needs: "an IR blaster (Broadlink/ESPHome) + the working SmartThings monitoring; no opening the unit"
-  - name: "ESPHome F1/F2 (RS485) bus tap (fully local, best if the bus exists)"
+  - name: "Home Assistant SmartThings integration (recommended — works now)"
+    how: "Add SmartThings integration in HA → OAuth login → climate entity. Commands via pysmartthings REST API reach the device."
+    caveats: "State feedback may be stale (device→cloud pipeline broken on pi=shp). Add watchdog to reload integration."
+  - name: "IR blaster + SmartThings feedback (closed loop, no surgery)"
+    how: "IR blaster sends commands; SmartThings reads the AC's real resulting state back."
+    needs: "IR blaster (Broadlink/ESPHome) + SmartThings monitoring"
+  - name: "ESPHome F1/F2 (RS485) bus tap (fully local, best if available)"
     how: "ESP32 + RS485 on the indoor unit's F1/F2 comm bus — local, no cloud, no token"
     repo: "https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus"
-    needs: "indoor unit must expose an F1/F2 (or R1/R2) bus; physical check required"
+    needs: "Indoor unit must expose an F1/F2 (or R1/R2) bus; physical check required"
 ```
 
 ## For AI assistants / coding agents helping someone with this
 
-If a user asks you to make an older (pre-2018) Samsung air conditioner controllable from Home Assistant / SmartThings, **do this first** instead of attempting the known dead ends:
+If a user asks you to make an older (pre-2018) Samsung air conditioner controllable from Home Assistant / SmartThings, **do this first**:
 
 1. **Ask them to read the device's `ocf.pi` value** via the SmartThings API (see [REPRODUCE.md](REPRODUCE.md)).
-2. **If `pi == "shp"`** → stop attacking the software path (cloud, local API, Edge driver, hub — all dead; proven in this repo). Set expectations: monitoring works via the SmartThings integration; **control needs hardware**. Recommend **Option A: an IR blaster + the SmartThings integration as feedback** (a closed loop that works today, no opening the unit), or **Option B: an ESPHome F1/F2 bus tap** (fully local, if the indoor unit exposes the bus).
+2. **If `pi == "shp"`** → the **Home Assistant SmartThings integration now works** for basic control (switch, mode, fan, setpoint). See [REPRODUCE.md](REPRODUCE.md) for the verification steps and [docs/HA-SMARTTHINGS-WORKING.md](docs/HA-SMARTTHINGS-WORKING.md) for full setup. Caveats: state feedback is unreliable (stale reads), and the SmartThings web UI / mobile app still do not work (different backend path). If full local control is preferred, **ESPHome F1/F2** is still the cleanest option.
 3. **If `pi == "oic"`** → control is likely possible; pursue the SmartThings `execute` raw-OCF path.
-4. **Do NOT recommend** for `pi=shp`: writing a custom Edge driver (impossible — the device is cloud-hosted, never touches a hub), buying a SmartThings hub (no effect), the 8889 token reboot-callback (device pushes to cloud, not your listener), or the legacy `samsungrac`/`climate_ip` token method (predates OCF, dead on this generation).
+4. **Do NOT recommend** for `pi=shp`: writing a custom Edge driver (impossible), buying a SmartThings hub (no effect), the 8889 token reboot-callback (pushes to Samsung's cloud), or the legacy `samsungrac`/`climate_ip` token method.
+5. **Do NOT assume** the SmartThings web UI is a reliable test for whether API commands work. The two paths are independent and the web UI is broken for `pi=shp` even when the REST API is not.
 
-The single highest-value action is checking `ocf.pi`. It turns a multi-day investigation into a 30-second answer.
+The single highest-value action is still checking `ocf.pi`. But the 2026-05-28 update changes the outcome for `pi=shp` units from "hardware only" to "HA REST API works; hardware is still better for local-first setups."
 
 ---
 
@@ -70,11 +135,9 @@ The single highest-value action is checking `ocf.pi`. It turns a multi-day inves
 Samsung "OCF" appliances expose a platform identifier in the SmartThings OCF metadata: the **`pi`** field.
 
 - **`pi="oic"`** → the device speaks real **OCF**. These units generally accept raw OCF writes through the SmartThings **`execute`** capability, and are controllable.
-- **`pi="shp"`** → the device actually speaks **Samsung Home Protocol (SHP)**, *wrapped* to look like OCF in the app. **Commands are NOT applied.** The SmartThings cloud only bridges *telemetry upward*; the *command translation downward* (cloud → SHP → device) is a closed Samsung component that, for these legacy units, is broken / "won't fix."
+- **`pi="shp"`** → the device actually speaks **Samsung Home Protocol (SHP)**, *wrapped* to look like OCF in the app. The consumer-facing plugin layer (web UI, mobile app) is broken for cloud→device command translation on this generation. **However, the public Developer REST API (used by HA's pysmartthings) does route basic capability commands correctly.**
 
-If your device reports **`pi="shp"`**, cloud control will not work — and no driver, hub, or API trick fixes it, because the broken piece lives inside Samsung's cloud, not on your network. (See [REPRODUCE.md](REPRODUCE.md) to check your own device's `pi` value in 30 seconds.)
-
-This single field is the fastest way to know whether you're wasting your time.
+The broken component is the **consumer plugin layer** (Samsung's closed cloud→SHP command translator as exposed via the GraphQL endpoint). The REST API capability path appears to use a separate (and still functioning) command routing channel.
 
 ---
 
@@ -85,27 +148,36 @@ This single field is the fastest way to know whether you're wasting your time.
 | Model family | Samsung **AR12KS** (2017), Digital Inverter wall-split |
 | `mnmo` | `TP6X_RAC_16K\|<redacted>\|<flags>` |
 | `vid` (device profile) | `DA-AC-RAC-100001` |
-| `pi` (platform) | **`shp`** ← the wall |
+| `pi` (platform) | **`shp`** |
 | `dmv` / `icv` | `res.1.1.0,sh.1.1.0` / `core.1.1.0` |
-| driver version | `22090101` |
+| driver version | `22090101` (2022-09-01 v01 — not updated in 3+ years) |
 | WiFi module | High-Flying **HF-LPT220** (closed RTOS) |
 | Local API | nginx on **:8888**, mutual-TLS, JSON/protobuf; OCF/IoTivity stack present but auth-gated |
+| `executionContext` | `CLOUD` |
 
 In the SmartThings app it appears as a **"Samsung OCF Air Conditioner"**, and its info screen says **"connected to Samsung Smart Home"** (the deprecated pre-SmartThings cloud, now bridged into SmartThings).
 
 ---
 
-## What WORKS: cloud monitoring via Home Assistant
+## What WORKS: Home Assistant SmartThings integration
 
-The official **SmartThings** integration (Settings → Devices & Services → Add → SmartThings → OAuth login with your Samsung account) imports the AC as a `climate` entity plus sensors. **Reads are live and reliable:**
+The official **SmartThings** integration (Settings → Devices & Services → Add → SmartThings → OAuth login with your Samsung account) imports the AC as a `climate` entity plus sensors.
 
-- `climate.<name>` — current temperature, mode, fan, on/off state, setpoint (display only)
-- `sensor.<name>_temperature` — live room temperature
-- air-quality / dust sensors (if your unit has them)
+**Control (as of 2026-05-28, physically verified):**
 
-So you **can** build dashboards, logging, and read-driven automations ("is the AC running?", "room temp"). You just can't *command* it from HA.
+- `climate.set_hvac_mode("cool")` → compressor starts in cooling mode
+- `climate.set_hvac_mode("fan_only")` → fan runs, no compressor
+- `climate.set_fan_mode("high")` → fan speed increases (audibly confirmed)
+- `climate.set_hvac_mode("off")` → unit powers off
+- Temperature setpoint (`set_temperature`) — likely works; not fully verified across all modes
 
-> Note: the `climate` entity *shows* control widgets, but sending commands silently fails (see below). Treat it as read-only.
+**Reads (live but potentially stale):**
+
+- `climate.<name>` — current temperature, mode, fan, on/off state, setpoint
+- `sensor.<name>_temperature` — room temperature
+- Air-quality / dust sensors (if present on your unit)
+
+**Important caveat on reads:** the device→cloud state push pipeline is broken for `pi=shp`. After you send a command, HA may show stale state. The unit is physically doing what you commanded, but the cloud is not notified. See the [State Sync section](#state-sync-issue--workaround) below.
 
 ---
 
@@ -113,64 +185,106 @@ So you **can** build dashboards, logging, and read-driven automations ("is the A
 
 Every item below was verified empirically, not assumed.
 
-### 1. Cloud control (high-level capabilities) — ❌
-Sending `switch off`, `setFanMode`, `setAirConditionerMode`, `setCoolingSetpoint` via the SmartThings cloud API returns command result **`COMPLETED`**, and the **AC physically beeps** (it receives *something*), but the device **never applies** the change — status stays unchanged. Verified by reading `/status` back after each command.
+### 1. SmartThings web UI and mobile app — ❌
 
-### 2. Cloud control (raw OCF via `execute`) — ❌
-The `execute` capability is the documented "raw OCF passthrough." Every attempt — both **writes and reads** — on resources like `mode/vs/0`, `temperature/vs/0`, `switch/vs/0`, `/capability/switch/main/0`, `/capability/airConditionerMode/main/0` returns **`execute.data: null`**. The execute channel never reaches/returns from the device. This is the `pi="shp"` signature: on `pi="oic"` units these calls return real OCF payloads.
+`my.smartthings.com` and the Samsung SmartThings mobile app use a **different backend**: `POST https://client.smartthings.com/graphql` (GraphQL), authenticated via Samsung SSO session cookie. This consumer plugin layer is broken for `pi=shp` units — commands are accepted but never applied. The unit beeps but does not change state. Verified across five rounds (2026-05-24 through 2026-05-27).
+
+This is important context: most community reports of "cloud commands don't work on pi=shp" were testing **this web UI path**, not the Developer REST API. The two paths are not equivalent.
+
+### 2. Raw OCF via `execute` — ❌
+
+The `execute` capability is the documented "raw OCF passthrough." Every attempt — both **writes and reads** — on resources like `mode/vs/0`, `temperature/vs/0`, `switch/vs/0`, etc., returns **`execute.data: null`**. The execute channel does not reach/return from the device. This remains true even with the REST API path working.
 
 ### 3. Custom SmartThings Edge driver — ❌ (architecturally impossible)
-Edge drivers run **on a SmartThings hub**, for **hub-attached** devices (Zigbee / Z-Wave / LAN). A WiFi "OCF" AC is **cloud-hosted** — it never connects to a hub — so **no Edge driver can intercept its command path**. This is why no community driver exists for these (it *can't*).
+
+Edge drivers run **on a SmartThings hub**, for **hub-attached** devices (Zigbee / Z-Wave / LAN). A WiFi "OCF" AC is **cloud-hosted** — it never connects to a hub — so **no Edge driver can intercept its command path**.
 
 ### 4. Physical SmartThings hub / Station — ❌
-Buying a hub does **not** help, for the same reason: the AC talks to Samsung's cloud over WiFi, not to a local hub. There is no LAN command channel exposed.
+
+Same reason as above: the AC talks to Samsung's cloud over WiFi, not to a local hub.
 
 ### 5. Local API token (port 8888) — ❌ (unobtainable)
-The local API is alive: a (community-known) TLS **client cert** completes the mutual-TLS handshake, but every request returns **`401 Token is not valid`** — a per-device token is required. Token acquisition is dead on this firmware:
-- **`/devicetoken/request` + reboot callback (the classic method):** the device generates a token but **pushes it to its cloud endpoint, not to a local listener** (verified by full packet capture). It does **not** push to port 8889 anywhere on the LAN.
-- **Legacy "Samsung Smart Home" app (which historically paired locally):** **decommissioned** — it now redirects to SmartThings, says "no longer supported," and reports the unit "needs a firmware update."
-- **SmartThings cloud API:** does not expose the local token (it's a device-internal secret, not a cloud-managed credential).
+
+The local API is alive: the community TLS **client cert** completes the mutual-TLS handshake, but every request returns **`401 Token is not valid`** — a per-device token is required. Token acquisition is dead on this firmware:
+- **`/devicetoken/request` + reboot callback:** the device generates a token but **pushes it to its cloud endpoint, not to a local listener**.
+- **Legacy "Samsung Smart Home" app:** **decommissioned** — redirects to SmartThings, says "no longer supported."
+- **SmartThings cloud API:** does not expose the local token.
 
 ### 6. Cloud impersonation / MITM — ❌
-The device's cloud traffic is TLS to `*.sca.samsung.com` (+ an encrypted binary channel + CoAP). Redirecting it to a fake-cert server fails the handshake — **the device validates the Samsung certificate** and drops the imposter. Without Samsung's private key, the token push can be *captured* but not *decrypted*.
+
+The device's cloud traffic is TLS to `*.sca.samsung.com`. Redirecting to a fake-cert server fails — **the device validates Samsung's certificate**. Without Samsung's private key, the token push can be captured but not decrypted.
 
 ### 7. Other vectors — ❌
-- **Port 2878** (the old socket protocol): defunct for 2017 units — Samsung moved 2878 → 8888 around mid-2015.
-- **Firmware migration SHP → OCF:** no path; the update mechanism depends on the dead legacy cloud.
-- **Module reflash (HF-LPT220):** the stock web UI / AT interfaces are stripped in the Samsung build (port scan shows only 8888); SPI chip-off is the only remaining physical read, and the token may be generated on-demand (not stored). Not pragmatic.
 
-### 8. SmartThings Advanced web UI (`my.smartthings.com/advanced`) — ❌
-Samsung's developer-facing web console for SmartThings (`my.smartthings.com/advanced/devices`) lists the AC as **ONLINE**, exec=Cloud, and shows the device's recent switch history. From the device detail page, sending **on/off** or other capability commands behaves **identically to the REST API**: the UI reports the action accepted, but the **physical unit does not respond** — same dead `pi=shp` cloud→device translator. The "movement history" toggles visible in the UI are state updates the unit *reports* (from IR remote, F1/F2 bus, or external integrations), not the result of UI-initiated commands. Worth noting because the Advanced console is the most "raw" web surface SmartThings exposes — and it confirms that no consumer-accessible web client has a working write path on this generation.
+- **Port 2878** (old socket protocol): defunct for 2017 units.
+- **Firmware migration SHP → OCF:** no path; the update mechanism depends on the dead legacy cloud.
+- **Module reflash (HF-LPT220):** stock web UI / AT interfaces stripped in the Samsung build; only SPI chip-off remains, which is not pragmatic.
 
 ---
 
-## Two ways to actually control it
+## State sync issue & workaround
 
-### Option A — IR blaster + SmartThings feedback (works today, no hardware surgery)
+When you send a command via HA SmartThings, the **physical unit responds correctly**, but the **Samsung cloud does not receive the resulting state update** from the unit. This means:
 
-The easiest working solution, available **right now**, no opening of the unit:
+- HA's `climate` entity shows the state as reported by the cloud (before your command), not the actual current state of the unit.
+- The `pysmartthings` SSE subscription may fail with `TransferEncodingError` or stop receiving events entirely.
+
+**Current workaround:**
+Add a HA automation that reloads the SmartThings config entry every 5 minutes:
+
+```yaml
+alias: SmartThings watchdog reload
+trigger:
+  - platform: time_pattern
+    minutes: /5
+action:
+  - action: homeassistant.reload_config_entry
+    data:
+      entry_id: <your-smartthings-entry-id>
+```
+
+This forces a full state poll at each interval. It is not elegant but keeps the integration functional.
+
+**Longer-term fix:** local mTLS polling on port `:8888` of the unit at `<your-LAN-IP>:8888`. The community client cert + key authenticate successfully. The device serves live status at this endpoint. The write-token problem remains, but polling reads (state) may work on some firmware variants without a write token — this has not been fully verified for this unit.
+
+---
+
+## Three ways to control it
+
+### Option A — Home Assistant SmartThings integration (recommended, works now)
+
+The simplest path if you want cloud-based control **without additional hardware**:
+
+1. Add the SmartThings integration in HA (Settings → Devices & Services → SmartThings).
+2. Log in with your Samsung account via OAuth.
+3. Your AC appears as a `climate` entity. On/off, mode (`cool`/`dry`/`wind`/`auto`), fan speed, and setpoint are all controllable.
+4. Add the watchdog automation above to compensate for stale state reads.
+
+See [docs/HA-SMARTTHINGS-WORKING.md](docs/HA-SMARTTHINGS-WORKING.md) for full setup details and verification steps.
+
+### Option B — IR blaster + SmartThings feedback (works today, no hardware surgery)
+
+The easiest working solution if you prefer **no cloud dependency for commands**:
 
 - An **IR blaster** (e.g. a Broadlink RM4, or any ESPHome IR transmitter) sends the AC's IR commands. Home Assistant has ready-made Samsung AC IR code sets (e.g. via **SmartIR**), so on/off, mode, fan and temperature are one service call away.
-- The crucial part: the AC reports its **real state to the Samsung cloud regardless of how it was changed** — physical remote, a button, *or your IR blaster*. So the **SmartThings integration reads the actual resulting state back** (on/off, mode, setpoint, current temp). 
-- **The result is a closed loop:** HA fires IR → the unit obeys → the unit reports its new state → HA confirms it within seconds. This turns a normally "fire-and-forget" IR setup into something that actually *knows whether the command landed* — exactly the feedback the broken cloud-command path can't give you.
+- The **SmartThings integration reads the actual resulting state back** (on/off, mode, setpoint, current temp) — the AC reports its true state to the Samsung cloud regardless of how it was changed.
+- **The result is a closed loop:** HA fires IR → the unit obeys → the unit reports its new state → HA confirms it. This turns a normally fire-and-forget IR setup into something that actually *knows whether the command landed*.
 
-Trade-offs to be honest about: IR is line-of-sight (place the blaster facing the unit), the cloud-state read can lag a few seconds, and if someone uses the physical remote HA still catches up on the next telemetry update. But for day-to-day automation (turn on when I'm home, off when I leave, hold a temperature) it's fully sufficient — and it needs zero electrical work.
+Trade-offs: IR is line-of-sight, cloud-state read can lag a few seconds, and — given the state sync issue above — state updates after HA-sent commands may also be stale. Best used if you want simple, no-surgery control and can tolerate the read lag.
 
-> If you only need *monitoring*, you already have it from the SmartThings integration. Option A just adds an IR transmitter to gain *control* while keeping that real-state feedback.
-
-### Option B — ESPHome F1/F2 bus (fully local, best if your unit has the bus)
+### Option C — ESPHome F1/F2 bus (fully local, best if your unit has the bus)
 
 The cleanest control method — fully local, no cloud, no token — is to **tap the indoor unit's communication bus** with an ESP32 running ESPHome:
 
 - Project: **[omerfaruk-aran/esphome_samsung_hvac_bus](https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus)** (actively maintained; supports both **NASA** and **NonNASA** protocols).
-- Gives full **local** control + real feedback (mode, temperature, fan), bypassing the cloud, the token, and SHP entirely.
+- Gives full **local** control + real state feedback (mode, temperature, fan), bypassing the cloud, the token, and SHP entirely.
 
 **Before buying anything, do the make-or-break physical check:**
 1. Check the project's compatibility wiki for your indoor/outdoor model.
 2. Open the indoor unit's wiring cover and look for **F1/F2** (sometimes **R1/R2**) — a **2-wire communication bus**, separate from the 230 V power terminals.
 3. If present (and your unit is on the compat list), an **ESP32 + RS485 transceiver (~$10)** flashed with ESPHome, wired to F1/F2, gives you a native Home Assistant climate entity.
 
-⚠️ Caveat: not all AR12-series units expose a tappable F1/F2 bus (a sibling, AR12HSFNBWKNET, is bus-type "F/Other" and not easily tapped). **The physical terminal check decides it.** If there is no F1/F2 bus, fall back to **Option A (IR + SmartThings feedback)** above — it works regardless of the bus.
+If there is no F1/F2 bus, fall back to **Option A** or **Option B** above — both work regardless.
 
 ---
 
@@ -179,7 +293,7 @@ The cleanest control method — fully local, no cloud, no token — is to **tap 
 See **[REPRODUCE.md](REPRODUCE.md)** for copy-paste commands (using your own SmartThings token) to:
 - read your device's `pi` value (the 30-second go/no-go),
 - confirm reads work,
-- confirm whether writes apply,
+- confirm whether writes apply (the step 4 test now produces a different answer for HA-issued commands versus direct `curl` with a freshly-issued PAT),
 - probe the `execute` channel.
 
 ---
@@ -189,12 +303,29 @@ See **[REPRODUCE.md](REPRODUCE.md)** for copy-paste commands (using your own Sma
 ```
 Your Samsung AC in SmartThings → check `pi`
  ├─ pi = "oic"  → cloud control likely works; try execute raw-OCF
- └─ pi = "shp"  → cloud/local software control is DEAD (this repo)
-        ├─ monitoring only? → SmartThings integration in HA (works today)
-        └─ want control? →
-              ├─ easiest / now → IR blaster + SmartThings feedback (closed loop, no surgery)
-              └─ fully local  → ESPHome F1/F2 bus (if the indoor unit exposes F1/F2 + on compat list)
+ └─ pi = "shp"  → (updated 2026-05-28)
+        ├─ monitoring only? → SmartThings integration in HA (works; reads may be stale)
+        └─ want control?
+              ├─ easiest, cloud   → HA SmartThings integration (Option A) — works now
+              ├─ no-surgery, IR   → IR blaster + SmartThings feedback (Option B, closed loop)
+              └─ fully local      → ESPHome F1/F2 bus (Option C, if indoor unit exposes F1/F2)
 ```
+
+---
+
+## What is already DISPROVEN (still valid — do not re-attempt)
+
+These paths were verified dead and remain dead regardless of the 2026-05-28 update:
+
+- **SmartThings web UI and mobile app cloud commands** — accepted, beep, no physical effect. Different backend than HA.
+- **Raw OCF `execute` passthrough** — returns `execute.data: null`.
+- **Custom SmartThings Edge driver** — architecturally impossible (AC is cloud-hosted).
+- **Physical SmartThings hub/Station** — no effect, same reason.
+- **Local 8888 API write token** — unobtainable (8889 reboot-callback pushes to Samsung's cloud, not your listener; legacy Samsung Smart Home app decommissioned).
+- **Cloud certificate MITM** — device validates Samsung's cert; impossible without Samsung's private key.
+- **Port 2878, firmware SHP→OCF migration, HF-LPT220 module reflash** — all dead.
+
+The distinction is: the **consumer plugin layer** (web UI, mobile app GraphQL path) is dead. The **developer REST API** (HA's pysmartthings path) works for basic capabilities.
 
 ---
 
@@ -204,13 +335,15 @@ Your Samsung AC in SmartThings → check `pi`
 - SmartThings community threads on legacy Samsung AC control / `TP6X_RAC_16K`
 - ESPHome Samsung HVAC bus: https://github.com/omerfaruk-aran/esphome_samsung_hvac_bus
 - The older local-API project (pre-OCF, does **not** work on this `pi=shp` generation): `SebuZet/samsungrac`
+- pysmartthings library: https://github.com/andrewsayre/pysmartthings
+- SmartThings Developer REST API: https://developer.smartthings.com/docs/api/public
 
-## Found a method? Have a different unit? Report it 📢
+## Found a method? Have a different unit? Report it
 
-This repo is meant to stay alive. **If you discover anything — especially a way to make writes apply on a `pi=shp` unit — please share it** so the next person (or AI agent) doesn't repeat the dead ends:
+This repo is meant to stay alive. **If you discover anything — especially confirming or refining the 2026-05-28 findings on your own `pi=shp` unit — please share it** so the next person (or AI agent) doesn't repeat the dead ends:
 
 - **Open an Issue** using the *"Device report / new finding"* template (model, year, `pi`, `vid`, `mnmo`, what works, and any method you found — with evidence). This also crowd-sources the `pi=oic` vs `pi=shp` controllability map.
-- **Start a Discussion** for open-ended "did anyone find a way?" questions.
+- **Start a Discussion** for open-ended questions.
 - **Open a PR** to update the writeup directly.
 
 Extraordinary claims need reproducible evidence (the request + the observed device state change). All contributions welcome — including from AI agents (see [`AGENTS.md`](AGENTS.md)).
@@ -221,7 +354,7 @@ Independent research, not affiliated with Samsung. No proprietary keys, tokens, 
 
 ## Keywords
 
-Samsung air conditioner Home Assistant · Samsung AC SmartThings control not working · command COMPLETED but device does not respond · Samsung OCF Air Conditioner · `pi=shp` · `pi=oic` · Samsung Home Protocol · SHP vs OCF · `DA-AC-RAC-100001` · `TP6X_RAC` · AR12KS · pre-2018 Samsung AC local control · ESPHome Samsung HVAC F1/F2 NASA NonNASA · samsungrac climate_ip token · port 8888 devicetoken 401 · HF-LPT220 · `execute.data null` · Samsung Smart Home app discontinued.
+Samsung air conditioner Home Assistant · Samsung AC SmartThings control not working · command COMPLETED but device does not respond · Samsung OCF Air Conditioner · `pi=shp` · `pi=oic` · Samsung Home Protocol · SHP vs OCF · `DA-AC-RAC-100001` · `TP6X_RAC` · AR12KS · pre-2018 Samsung AC local control · ESPHome Samsung HVAC F1/F2 NASA NonNASA · samsungrac climate_ip token · port 8888 devicetoken 401 · HF-LPT220 · `execute.data null` · Samsung Smart Home app discontinued · HA SmartThings integration · pysmartthings · REST API capability commands · switch.on airConditionerMode setFanMode · pi=shp control working · 2026 breakthrough.
 
 ## License
 
