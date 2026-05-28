@@ -84,6 +84,85 @@ Revoke the PAT: https://account.smartthings.com/tokens
 | `pi` | write applies (step 4) | `execute.data` (step 5) | Verdict |
 |------|------------------------|--------------------------|---------|
 | `oic` | yes | OCF payload | controllable via cloud |
-| `shp` | no (beeps, no change) | `null` | **software control dead → hardware (ESPHome F1/F2)** |
+| `shp` | via direct curl: may beep, no change | `null` | **REST API via HA works (see step 7 below); web UI does not** |
 
 Please share your results in an issue to grow the compatibility map.
+
+---
+
+## 7. Verify Home Assistant SmartThings integration control (NEW — 2026-05-28)
+
+This step verifies the specific REST API path that Home Assistant's pysmartthings library uses. It is **distinct from step 4**: the commands in step 4 use a freshly-generated PAT, while HA uses an OAuth token that may go through a slightly different authorization flow. Both ultimately hit `api.smartthings.com/v1/devices/{id}/commands` — but the practical way to confirm HA control works on your unit is to test it directly through HA after setting up the integration.
+
+### 7a. Quick curl test (same endpoint HA uses)
+
+```bash
+export TOK="<YOUR_SMARTTHINGS_PAT>"
+export DEV="<YOUR_DEVICE_ID>"
+
+# Turn on and set cool mode
+curl -s -X POST \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commands": [
+      {"component":"main","capability":"switch","command":"on"},
+      {"component":"main","capability":"airConditionerMode",
+       "command":"setAirConditionerMode","arguments":["cool"]}
+    ]
+  }' \
+  https://api.smartthings.com/v1/devices/$DEV/commands
+```
+
+Expected response:
+```json
+{"results":[{"id":"...","status":"COMPLETED"},{"id":"...","status":"COMPLETED"}]}
+```
+
+**Watch your physical unit** — it should power on and enter cool mode within ~2 seconds. If it does, your `pi=shp` unit is controllable via HA.
+
+### 7b. Test fan speed
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commands": [
+      {"component":"main","capability":"airConditionerFanMode",
+       "command":"setFanMode","arguments":["high"]}
+    ]
+  }' \
+  https://api.smartthings.com/v1/devices/$DEV/commands
+```
+
+Expected: fan audibly increases speed.
+
+### 7c. Turn off
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commands": [
+      {"component":"main","capability":"switch","command":"off"}
+    ]
+  }' \
+  https://api.smartthings.com/v1/devices/$DEV/commands
+```
+
+Expected: unit powers off.
+
+### 7d. Note on state reads after commands
+
+After running any of the above commands, reading back `/status` will likely show the **pre-command state** — because the device→cloud state push is broken for `pi=shp`. The **physical unit has applied the command**, but the Samsung cloud has not been updated. This is expected. See [README.md](README.md) and [docs/HA-SMARTTHINGS-WORKING.md](docs/HA-SMARTTHINGS-WORKING.md) for the watchdog workaround.
+
+---
+
+### Full results summary
+
+| `pi` | HA SmartThings control (step 7) | Web UI commands | Raw `execute.data` | Verdict |
+|------|---|---|---|---|
+| `oic` | likely works | likely works | OCF payload | Fully controllable via cloud |
+| `shp` | ✅ Switch, mode, fan, setpoint work | ❌ Beeps, no effect | `null` | **HA REST API path works; web UI does not; state reads stale** |
